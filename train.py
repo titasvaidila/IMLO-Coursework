@@ -1,4 +1,5 @@
-from torchvision import transforms, datasets
+from torchvision import datasets
+from torchvision.transforms import v2
 from sklearn.model_selection import train_test_split
 import numpy as np
 from torch.utils.data import Subset
@@ -8,26 +9,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Define the transformations for the training dataset
-train_transform = transforms.Compose([
-    transforms.Resize((224, 224)), 
-    transforms.RandomHorizontalFlip(p=0.5), 
-    transforms.ToTensor(), 
-    transforms.Normalize(
-        # Mean and std of Imagenet is a common practice
-        mean=[0.485, 0.456, 0.406], 
-        std=[0.229, 0.224, 0.225]
-    )
+train_transform = v2.Compose([
+    v2.ToImage(),                            # Convert to image tensor
+    v2.RandomResizedCrop(size=(224, 224), antialias=True), # Zoom in/out randomly
+    v2.RandomHorizontalFlip(p=0.5),          # Flip left-to-right
+    v2.RandomRotation(degrees=20),           # Tilt the animal slightly
+    v2.ColorJitter(brightness=0.3, contrast=0.3), # Handle different lighting
+    v2.ToDtype(torch.float32, scale=True),   # Convert to float and scale to [0, 1]
+    v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
 # Define the transformations for the validation dataset (no augmentation, only resizing and normalization)
-val_transform = transforms.Compose([
-    transforms.Resize((224, 224)), 
-    transforms.ToTensor(), 
-    transforms.Normalize(
-        # Mean and std of Imagenet is a common practice
-        mean=[0.485, 0.456, 0.406], 
-        std=[0.229, 0.224, 0.225]
-    )
+val_transform = v2.Compose([
+    v2.ToImage(),
+    v2.Resize((224, 224), antialias=True),
+    v2.ToDtype(torch.float32, scale=True),
+    v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
 # Load the training dataset
@@ -56,24 +53,57 @@ val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 class BreedCNN(nn.Module):
     def __init__(self, num_classes=37):
         super(BreedCNN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2) # Efficient pooling layer to reduce size of data
-        self.fc = nn.Linear(32 * 56 * 56, num_classes)
+
+        self.block1 = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+
+        self.block2 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+
+        self.block3 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+
+        self.block4 = nn.Sequential(
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+
+        self.block5 = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(512 * 7 * 7, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
+        )
 
     def forward(self, x):
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = self.pool(x)
-
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = self.pool(x)
-
-        x = x.view(-1, 32 * 56 * 56)
-
-        x = self.fc(x)
-
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.block4(x)
+        x = self.block5(x)
+        x = self.classifier(x)
         return x
     
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -82,7 +112,9 @@ print(f"Using device: {device}")
 model = BreedCNN(num_classes=37).to(device)
 
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
+
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
 epochs = 30
 best_accuracy = 0.0
@@ -118,6 +150,8 @@ for epoch in range(epochs):
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
+    
+    scheduler.step()
 
     avg_train_loss = running_loss / len(train_loader)    
     avg_val_loss = val_loss / len(val_loader)
