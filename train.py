@@ -400,7 +400,7 @@ def eval_loop(loader, model, criterion):
 # MAIN TRAINING LOOP
 
 ## MODEL LOOP ##
-print("[INFO] Training starting...")
+print("Training starting...")
 
 train_losses = []
 train_accuracies = []
