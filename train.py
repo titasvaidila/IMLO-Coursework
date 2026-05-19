@@ -1,12 +1,16 @@
+import random
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from torch import nn, optim
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, Dataset    # for creating custom dataset and dataloader
+from PIL import Image
 from torchvision import datasets    # for loading Oxford-IIIT Pet datasets
 from torchvision.transforms import v2   # for data augmentation and normalization
 from torchvision.transforms.v2 import functional as TF
-from torch.utils.data import Dataset, DataLoader # for creating custom dataset and dataloader
-from PIL import Image
-import numpy as np
-import torch
 
-epoch = 30
+epochs = 30
 lr = 0.001
 weight_decay = 0.001
 num_classes = 37
@@ -27,6 +31,15 @@ else:
 
 torch.set_default_device(device)
 print(f"Using device: {device}")
+
+# SET SEED
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+if device.type == 'cuda':
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 # DATA AUGMENTATION
 train_transform = v2.Compose([
@@ -82,7 +95,7 @@ class PetWithTrimap(Dataset):
         return x, int(label)
 
 train_dataset = PetWithTrimap(root='./data', split='trainval', transform=train_transform)
-test_dataset = PetWithTrimap(root='./data', split='trainval', transform=eval_transform)
+eval_dataset = PetWithTrimap(root='./data', split='trainval', transform=eval_transform)
 
 # MODEL
 class BasicBlock(nn.Module):
@@ -115,6 +128,15 @@ class BasicBlock(nn.Module):
 class MyCNN(nn.Module):
     def __init__(self, num_classes=37, in_channels=4, dropout=0.4):
         super().__init__()
+
+        def forward(self, x):
+            x = self.stem(x)
+            x = self.stage1(x)
+            x = self.stage2(x)
+            x = self.stage3(x)
+            x = self.stage4(x)
+            x = self.head(x)
+            return x
 
         # 7x7 kernel sees a large patch of the input image, useful for low-level features
         self.stem = nn.Sequential(
@@ -150,3 +172,129 @@ class MyCNN(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(512, num_classes),
         )
+
+# TRAINING
+model = MyCNN(num_classes=num_classes, in_channels=4, dropout=0.4).to(device)
+
+criterion = nn.CrossEntropyLoss()
+optimiser = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=2,
+    pin_memory=(device.type == 'cuda'),
+)
+
+eval_loader = DataLoader(
+    eval_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    num_workers=2,
+    pin_memory=(device.type == 'cuda'),
+)
+
+def train_loop(loader, model, criterion, optimiser):
+
+    model.train()
+    
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    
+    for inputs, labels in loader:
+        inputs = inputs.to(device)
+        labels = labels.to(device)
+        
+        # Clear gradients from the previous step
+        optimiser.zero_grad()
+        
+        # Get models predicitons for the current batch.
+        outputs = model(inputs)
+        
+        # Compute loss
+        loss = criterion(outputs, labels)
+        
+        # Compute gradients (backpropagation)
+        loss.backward()
+        
+        # Update weights
+        optimiser.step()
+        
+        # Track running totals for reporting
+        running_loss += loss.item() * inputs.size(0)
+        correct += (outputs.argmax(dim=1) == labels).sum().item()
+        total += labels.size(0)
+    
+    avg_loss = running_loss / total
+    accuracy = 100 * correct / total
+
+    print(f"Training Set:   Loss: {avg_loss:.4f} | Accuracy: {accuracy:.2f}%")
+
+    return avg_loss, accuracy
+
+def eval_loop(loader, model, criterion):
+    # Disable dropout and other training-specific layers for evaluation
+    model.eval()
+    
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    
+    # Disable gradient calculations for evaluation, since we won't be updating weights
+    with torch.no_grad():
+        for inputs, labels in loader:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            
+            running_loss += loss.item() * inputs.size(0)
+            correct += (outputs.argmax(dim=1) == labels).sum().item()
+            total += labels.size(0)
+    
+    avg_loss = running_loss / total
+    accuracy = 100 * correct / total
+    
+    print(f"Evaluation Set: Loss: {avg_loss:.4f} | Accuracy: {accuracy:.2f}%")
+
+    return avg_loss, accuracy
+
+# MAIN TRAINING LOOP
+
+## MODEL LOOP ##
+print("[INFO] Training starting...")
+
+train_losses = []
+train_accuracies = []
+eval_losses = []
+eval_accuracies = []
+best_acc = 0.0
+
+for e in range(epochs):
+    print(f"Epoch [{e+1}/{epochs}]")
+    
+    # One epoch of training on the augmented training data.
+    train_loss, train_acc = train_loop(train_loader, model, criterion, optimiser)
+    
+    # Evaluate on the unaugmented evaluation data.
+    eval_loss, eval_acc = eval_loop(eval_loader, model, criterion)
+    
+    # Record the losses and accuracies
+    train_losses.append(train_loss)
+    train_accuracies.append(train_acc)
+    eval_losses.append(eval_loss)
+    eval_accuracies.append(eval_acc)
+    
+    # Save if this is the best model so far
+    if eval_acc > best_acc:
+        best_acc = eval_acc
+        torch.save(model.state_dict(), f"{model_path}.pth")
+        print(f"New best model saved (accuracy: {best_acc:.2f}%)")
+    
+    print("-" * 30)
+
+print(f"Training complete. Best evaluation accuracy: {best_acc:.2f}%")
+
